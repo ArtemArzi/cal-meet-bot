@@ -1,0 +1,13 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+.sisyphus
+__pycache__/
+*.py[cod]
+tests/
+var/
+*.db
+*.sqlite
+.env
+.env.local

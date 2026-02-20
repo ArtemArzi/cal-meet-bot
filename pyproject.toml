@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bot-vstrechi"
+version = "0.1.0"
+description = "MVP meeting bot domain foundation"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "PyJWT[crypto]>=2.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "basedpyright>=1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.basedpyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+reportAny = "none"
+reportExplicitAny = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnusedCallResult = "none"
+reportUnnecessaryCast = "none"
+reportUnnecessaryIsInstance = "none"
+reportPrivateUsage = "none"
+reportUnusedClass = "none"
+reportUnannotatedClassAttribute = "none"
+reportUnnecessaryTypeIgnoreComment = "none"
