@@ -600,7 +600,7 @@ class TelegramWebhookAdapter:
                 payload={
                     "telegram_user_id": chat_id,
                     "text": (
-                        "Введите новый chat_id (например, -1001234567890).\n"
+                        "Введите новый chat_id (например, -5151698406).\n"
                         f"{CHAT_INPUT_EXIT_HINT}"
                     ),
                 },
@@ -642,7 +642,7 @@ class TelegramWebhookAdapter:
                     "text": (
                         "Чат очищен для открытых встреч.\n"
                         f"Обновлено встреч: {updated_count}\n"
-                        "Сразу введите новый chat_id (например, -1001234567890).\n"
+                        "Сразу введите новый chat_id (например, -5151698406).\n"
                         f"{CHAT_INPUT_EXIT_HINT}"
                     ),
                 },
