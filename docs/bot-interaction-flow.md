@@ -12,7 +12,7 @@
 
 В scope:
 
-- Команды `/start`, `/help`, `/people`.
+- Команды `/start`, `/help`, `/chat`, `/people`.
 - Confirmation lifecycle: `pending -> needs_initiator_decision -> confirmed/cancelled/expired`.
 - Callback-токены решений участников/инициатора (`act:*`) и stale-action поведение.
 - DM reminders для участников без решения и эскалации менеджерам при недоставке DM.
@@ -28,6 +28,7 @@ Out of scope:
 |---|---|---|---|
 | `/start` | Проверка привязки + краткий onboarding | DM/GROUP | All |
 | `/help` | Описание calendar-first режима | DM/GROUP | All |
+| `/chat` | Настройка target chat для групповых статусов | DM only | Managers only |
 | `/people` | Управление списком участников | DM only | Managers only |
 
 Если бот получает неподдерживаемую команду, неверный тип обновления или команду в неверном контексте, он возвращает `noop` (INVALID_STATE) без мутаций workflow.

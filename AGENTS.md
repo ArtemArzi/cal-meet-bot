@@ -1,59 +1,73 @@
 # PROJECT KNOWLEDGE BASE - Bot Vstrechi
 
-**Generated:** 2026-02-20
-**Commit:** no-commit
-**Branch:** no-branch
+**Generated:** 2026-02-25
+**Commit:** 51a12bb
+**Branch:** main
 
 ## OVERVIEW
-Calendar-first Telegram bot for meeting confirmations. Google Calendar is the source of truth. Built with Python 3.12 using Hexagonal (Clean) Architecture.
+Calendar-first Telegram bot for meeting confirmations. Google Calendar is the source of truth; Telegram is the interaction channel. Python 3.12, FastAPI, SQLite (WAL), Outbox workers.
 
 ## STRUCTURE
 ```
 src/bot_vstrechi/
-├── domain/         # Pure business logic (state machine, policies)
-├── application/    # Orchestration layer (MeetingWorkflowService)
-├── infrastructure/ # Low-level adapters (logging, settings, runtime)
-├── db/             # Persistence (SQLite, Repository, Outbox)
-├── telegram/       # Telegram adapter and presentation
-├── calendar/       # Google Calendar API adapter
-├── workers/        # Asynchronous background processors
-├── api/            # Webhook endpoints (FastAPI)
-└── asgi.py         # App entry point
+├── domain/         # Pure state machine, policies, immutable models
+├── application/    # Workflow orchestration and outbox/job enqueue
+├── db/             # SQLite schema, repository, claims, retention
+├── telegram/       # Webhook adapter, callback tokens, rendering, TG client
+├── calendar/       # Google Calendar client + gateway
+├── workers/        # Outbox/Scheduler/CalendarSync loops
+├── infrastructure/ # Runtime wiring, settings, logging, bootstrap
+├── api/            # FastAPI webhook endpoints
+├── asgi.py         # ASGI app entrypoint
+└── worker_entrypoint.py # standalone background loop entrypoint
 ```
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Business Rules | `src/bot_vstrechi/domain/` | State transitions, deadline policies |
-| DB Queries | `src/bot_vstrechi/db/repository.py` | Raw SQL, atomic transactions |
-| Bot UI/Commands | `src/bot_vstrechi/telegram/` | Keyboards, message formatting |
-| API Integration | `src/bot_vstrechi/calendar/` | Google Calendar API calls |
-| Sync/Jobs | `src/bot_vstrechi/workers/` | Outbox, CalendarSync, Scheduler |
+| Lifecycle transitions | `src/bot_vstrechi/domain/state_machine.py` | Canonical state graph |
+| Main orchestration | `src/bot_vstrechi/application/service.py` | Transaction boundaries + outbox sync |
+| Persistence/SQL | `src/bot_vstrechi/db/repository.py` | Raw SQL, WAL, atomic writes |
+| Telegram callbacks | `src/bot_vstrechi/telegram/adapter.py` | Token validation + command routing |
+| Calendar sync | `src/bot_vstrechi/workers/calendar_sync.py` | Polling/webhook reconciliation |
+| Reliable delivery | `src/bot_vstrechi/workers/outbox.py` | Retries, fallback, finalization chain |
+| Runtime wiring | `src/bot_vstrechi/infrastructure/runtime.py` | Startup/shutdown and worker loop |
 
 ## CONVENTIONS
-- **Hexagonal Layering:** Domain (pure) → Application (service) → Infrastructure/Adapters.
-- **Side-Effect-Free Domain:** Business logic computes intent; service layer executes it.
-- **Deterministic Time:** `now` parameter must be passed into all time-dependent functions.
-- **Atomic Persistence:** All state changes + outbox + jobs enqueued in one transaction.
+- **Layering:** Domain -> Application -> Adapters/Infrastructure.
+- **Deterministic time:** Pass `now` into time-dependent logic; avoid direct clock calls in domain/application.
+- **Atomicity:** State updates + outbox + jobs must be committed in one transaction.
+- **Identity model:** Primary identity is `telegram_user_id` (int). `@username` is display/search alias only.
+- **Side effects:** Telegram and Calendar calls go through Outbox/Workers, not direct from workflow transitions.
 
-## ANTI-PATTERNS (THIS PROJECT)
-- **NO ORMs:** Raw SQL with dataclasses only.
-- **NO Pydantic in Domain:** Use native frozen dataclasses.
-- **NO Meeting Creation via Bot:** Meetings must originate from Google Calendar.
-- **NO Identity via @username:** `telegram_user_id` (int) is the only primary key.
+## ANTI-PATTERNS (PROJECT-SPECIFIC)
+- **No ORM layer:** Raw SQL only in repository.
+- **No domain I/O:** No HTTP, DB, logging side effects in `domain/`.
+- **No meeting creation from Telegram commands:** Meetings originate from Google Calendar flow.
+- **No username-as-PK logic:** Never key business logic by `@username`.
 
 ## COMMANDS
 ```bash
-# Setup
+# install
 pip install -e .
-# Run (Dev)
+
+# run API (dev)
 uvicorn src.bot_vstrechi.asgi:app --reload
-# Tests
+
+# run background workers (single process loop)
+PYTHONPATH=src python3 -m bot_vstrechi.worker_entrypoint
+
+# tests
 pytest
 ```
 
-## NOTES
-- **Identity Safety:** `@username` is only an alias; never use as PK.
-- **Idempotency:** Inbound events are deduplicated via `InboundEventDedup`.
-- **Reliability:** Side-effects (TG messages, Calendar updates) use the Outbox Pattern.
-
+## MODULE DOCS
+- `src/bot_vstrechi/domain/AGENTS.md`
+- `src/bot_vstrechi/application/AGENTS.md`
+- `src/bot_vstrechi/db/AGENTS.md`
+- `src/bot_vstrechi/telegram/AGENTS.md`
+- `src/bot_vstrechi/calendar/AGENTS.md`
+- `src/bot_vstrechi/workers/AGENTS.md`
+- `src/bot_vstrechi/infrastructure/AGENTS.md`
+- `src/bot_vstrechi/api/AGENTS.md`
+- `tests/AGENTS.md`

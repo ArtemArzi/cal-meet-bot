@@ -4,7 +4,7 @@
 Adapter layer for Telegram Bot API. Handles updates, command routing, and message presentation.
 
 ## STRUCTURE
-- `adapter.py`: `TelegramWebhookAdapter` handles routing for `/start`, `/help`, `/people`.
+- `adapter.py`: `TelegramWebhookAdapter` handles routing for `/start`, `/help`, `/chat`, `/people`.
 - `presentation.py`: Human-friendly formatting, keyboards, and `BOT_COMMANDS`.
 - `callback_tokens.py`: `CallbackTokenService` for secure `act:{token}` lifecycle.
 - `client.py`: `HttpxTelegramClient` for outbound API calls.
@@ -17,9 +17,11 @@ Adapter layer for Telegram Bot API. Handles updates, command routing, and messag
 
 ## CONVENTIONS
 - **Manager-Only:** `/people` requires `is_manager=1` in the database.
+- **Manager-Only:** `/chat` requires `is_manager=1` and works in DM only.
 - **DM-Only:** `/people` logic enforces `chat_id == actor_user_id`.
 - **Tokenized Callbacks:** All buttons use `act:{token}` to prevent tampering.
 - **Identity Safety:** `@username` is only an alias; `telegram_user_id` is the primary key.
+- **Participant staleness guard:** Participant callbacks are rejected if actor is no longer required in current meeting round.
 
 ## ANTI-PATTERNS
 - **NO** manual formatting in adapter; use `presentation.py`.

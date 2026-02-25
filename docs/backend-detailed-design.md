@@ -13,7 +13,7 @@
 ### In scope (MVP)
 
 - Calendar-first поток: события создаются/переносятся/отменяются в Google Calendar, Telegram используется для уведомлений, подтверждений и эскалаций.
-- Telegram command surface ограничен `/start`, `/help`, `/people`.
+- Telegram command surface ограничен `/start`, `/help`, `/chat`, `/people`.
 - Жизненный цикл подтверждения: `pending -> needs_initiator_decision -> confirmed/cancelled/expired`.
 - Google Calendar (Workspace + DWD), Telegram Bot API.
 - SQLite как primary storage.

@@ -49,6 +49,7 @@ src/bot_vstrechi/
 |---|---|---|
 | `/start` | Начать работу с ботом и привязать свой Telegram ID к системе. | Все пользователи |
 | `/help` | Справка по работе бота и правилам дедлайнов. | Все пользователи |
+| `/chat` | Настроить чат для групповых статус-уведомлений. | Только Менеджеры (только ЛС) |
 | `/people` | Управление пользователями и их привязкой (Telegram ↔ Email). | Только Менеджеры |
 
 > **⚠️ Важно:** У бота **НЕТ** команд `/meet` или `/schedule`. Он не умеет создавать или редактировать время встреч. Любые изменения времени или состава участников должны делаться **только в Google Календаре**.
@@ -105,11 +106,9 @@ pip install -e .
 ```bash
 uvicorn src.bot_vstrechi.asgi:app --reload
 ```
-В других терминалах запустите воркеры (через кастомные скрипты или напрямую):
+В отдельном терминале запустите фоновый цикл воркеров:
 ```bash
-python -m src.bot_vstrechi.workers.outbox
-python -m src.bot_vstrechi.workers.calendar_sync
-python -m src.bot_vstrechi.workers.scheduler
+PYTHONPATH=src python3 -m bot_vstrechi.worker_entrypoint
 ```
 
 ### 5. Deployment (Production)

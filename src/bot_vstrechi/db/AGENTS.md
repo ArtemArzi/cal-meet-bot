@@ -11,6 +11,7 @@
 - **Outbox:** Logic for `enqueue_outbox` and `claim_due_outbox` handles async task dispatch.
 - **Jobs:** Scheduled jobs (reminders, deadlines) are stored in the `job` table.
 - **Atomic Operations:** The `@atomic` context manager ensures transaction integrity.
+- **Cleanup helpers:** `suppress_pending_outbox_by_keys`, `suppress_pending_group_progress_outbox`, `expire_callback_tokens_for_participants`.
 
 ## CONVENTIONS
 - **Raw SQL Only:** Use standard SQL for all queries. No ORMs allowed.

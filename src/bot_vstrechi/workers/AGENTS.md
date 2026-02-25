@@ -15,12 +15,14 @@ src/bot_vstrechi/workers/
 - **Reliable Side-Effects:** Check `outbox.py` for how the system ensures Telegram messages are sent exactly once or retried.
 - **Calendar Updates:** Check `calendar_sync.py` for the polling logic that identifies new or modified meetings.
 - **Business Timing:** Check `scheduler.py` for the state machine transitions triggered by deadlines and participant timeouts.
+- **Finalization chain:** In `outbox.py`, `CALENDAR_PATCH_EVENT` may enqueue final group status updates after patch success/failure.
 
 ## CONVENTIONS
 - **Long-Running Processes:** All workers run as infinite loops, polling the SQLite database for work items.
 - **DB Polling:** Use a wait-interval (e.g., 1-5 seconds) between poll cycles to keep CPU usage low.
 - **Idempotency:** Handle event duplication via `InboundEventDedup` or unique constraint checks in the repository layer.
 - **Outbox Pattern:** Side-effects must never be executed directly in the main workflow; they are staged in the `outbox` table and delivered by `OutboxWorker`.
+- **Dispatch-time guards:** Before sending stale participant DM or stale pending-progress edit, workers re-check meeting state/round in DB.
 
 ## ANTI-PATTERNS
 - **NO HTTP calls in main thread:** Never perform Google Calendar or Telegram API calls outside of a worker process.
