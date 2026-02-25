@@ -506,7 +506,7 @@ class TelegramWebhookAdapter:
                 payload={
                     "telegram_user_id": chat_id,
                     "text": (
-                        "Введите chat_id числом, например: -1001234567890\n"
+                        "Введите chat_id числом, например: -5151698406\n"
                         f"{CHAT_INPUT_EXIT_HINT}"
                     ),
                 },
@@ -2073,6 +2073,22 @@ class TelegramWebhookAdapter:
                     message=STALE_ACTION_MESSAGE,
                 )
 
+            if callback_token.action_type in {
+                CallbackActionType.PARTICIPANT_CONFIRM,
+                CallbackActionType.PARTICIPANT_CANCEL,
+            }:
+                active_participant_ids = {
+                    participant.telegram_user_id
+                    for participant in meeting.participants
+                    if participant.is_required
+                }
+                if actor_id not in active_participant_ids:
+                    return TelegramAdapterResult(
+                        outcome=Outcome.NOOP,
+                        reason_code=ReasonCode.STALE_ACTION,
+                        message=STALE_ACTION_MESSAGE,
+                    )
+
             if callback_token.action_type == CallbackActionType.PARTICIPANT_CONFIRM:
                 execution = self._workflow_service.record_participant_decision(
                     meeting_id=meeting.meeting_id,
@@ -2118,6 +2134,7 @@ class TelegramWebhookAdapter:
                     meeting_id=meeting.meeting_id,
                     actor_user_id=effective_actor_id,
                     reason="initiator_callback",
+                    requested_by_user_id=actor_id,
                     now=now,
                 )
                 return finalize(
@@ -2141,6 +2158,7 @@ class TelegramWebhookAdapter:
                 execution = self._workflow_service.proceed_without_subset(
                     meeting_id=meeting.meeting_id,
                     actor_user_id=effective_actor_id,
+                    requested_by_user_id=actor_id,
                     now=now,
                 )
                 return finalize(

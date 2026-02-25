@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from bot_vstrechi.domain.commands import CommandExecution
+from bot_vstrechi.application.service import MeetingWorkflowService
 from bot_vstrechi.db.repository import SQLiteRepository
 from bot_vstrechi.domain.models import (
+    Decision,
     CommandResult,
     Meeting,
     MeetingParticipant,
     MeetingState,
     OutboxEffectType,
+    OutboxStatus,
     Outcome,
     ReasonCode,
 )
@@ -145,7 +150,15 @@ def _meeting(now: datetime) -> Meeting:
 def test_group_status_first_send_stores_message_pointer(tmp_path: Path) -> None:
     now = datetime(2026, 2, 21, 10, 0, 0)
     repository = _repo(tmp_path)
-    meeting = _meeting(now)
+    meeting = replace(
+        _meeting(now),
+        confirmation_deadline_at=now + timedelta(minutes=20),
+        participants=(
+            MeetingParticipant(telegram_user_id=100, is_required=False),
+            MeetingParticipant(telegram_user_id=200, is_required=True),
+            MeetingParticipant(telegram_user_id=300, is_required=True),
+        ),
+    )
     repository.insert_meeting(meeting, now=now)
 
     _ = repository.enqueue_outbox(
@@ -183,7 +196,9 @@ def test_group_status_first_send_stores_message_pointer(tmp_path: Path) -> None:
 def test_group_status_edit_failure_posts_single_replacement(tmp_path: Path) -> None:
     now = datetime(2026, 2, 21, 10, 0, 0)
     repository = _repo(tmp_path)
-    meeting = _meeting(now)
+    meeting = replace(
+        _meeting(now), confirmation_deadline_at=now + timedelta(minutes=20)
+    )
     repository.insert_meeting(meeting, now=now)
 
     with_pointer = Meeting(
@@ -248,4 +263,179 @@ def test_group_status_edit_failure_posts_single_replacement(tmp_path: Path) -> N
     updated = repository.get_meeting(meeting.meeting_id)
     assert updated is not None
     assert updated.group_status_message_id == 888
+    repository.close()
+
+
+def test_pending_progress_before_pointer_eventually_updates_group_message(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 2, 21, 10, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = replace(
+        _meeting(now),
+        confirmation_deadline_at=now + timedelta(minutes=20),
+        participants=(
+            MeetingParticipant(telegram_user_id=100, is_required=False),
+            MeetingParticipant(telegram_user_id=200, is_required=True),
+            MeetingParticipant(telegram_user_id=300, is_required=True),
+        ),
+    )
+    repository.insert_meeting(meeting, now=now)
+    service = MeetingWorkflowService(repository, calendar_gateway=MagicMock())
+
+    execution = service.record_participant_decision(
+        meeting_id=meeting.meeting_id,
+        round=meeting.confirmation_round,
+        actor_user_id=200,
+        decision=Decision.CONFIRM,
+        source="telegram",
+        now=now,
+    )
+    assert execution.result.outcome == Outcome.OK
+
+    telegram = _FakeTelegramClient(next_message_id=901)
+    worker = OutboxWorker(
+        repository=repository,
+        dispatcher=OutboxDispatcher(
+            repository=repository,
+            telegram_client=telegram,
+            calendar_client=_FakeCalendarClient(),
+        ),
+    )
+
+    first_tick = worker.run_once(now=now)
+    assert first_tick.processed is True
+    assert first_tick.status == OutboxStatus.PENDING
+    assert len(telegram.edited) == 0
+
+    _ = repository.enqueue_outbox(
+        effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+        payload={
+            "telegram_user_id": meeting.chat_id,
+            "text": "pending",
+            "_group_status_message": True,
+            "_meeting_id": meeting.meeting_id,
+        },
+        idempotency_key="group:bootstrap",
+        now=now,
+    )
+
+    second_tick = worker.run_once(now=now)
+    assert second_tick.processed is True
+    assert second_tick.status == OutboxStatus.DONE
+
+    third_tick = worker.run_once(now=now + timedelta(seconds=6))
+    assert third_tick.processed is True
+    assert third_tick.status == OutboxStatus.DONE
+    assert len(telegram.edited) == 1
+    repository.close()
+
+
+def test_stale_pending_progress_does_not_overwrite_final_group_status(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 2, 21, 10, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = replace(
+        _meeting(now),
+        confirmation_deadline_at=now + timedelta(minutes=20),
+        group_status_message_id=777,
+        participants=(
+            MeetingParticipant(telegram_user_id=100, is_required=False),
+            MeetingParticipant(telegram_user_id=200, is_required=True),
+            MeetingParticipant(telegram_user_id=300, is_required=True),
+        ),
+    )
+    repository.insert_meeting(meeting, now=now)
+
+    _ = repository.enqueue_outbox(
+        effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
+        payload={
+            "telegram_user_id": meeting.chat_id,
+            "text": "pending progress",
+            "_group_status_message": True,
+            "_meeting_id": meeting.meeting_id,
+            "_meeting_round": meeting.confirmation_round,
+            "_group_status_tag": "pending_progress",
+        },
+        idempotency_key=(
+            f"group_status:{meeting.meeting_id}:r{meeting.confirmation_round}:"
+            "pending_progress:edit:u200:confirm:2026-02-21T10:00:00.000000"
+        ),
+        now=now,
+    )
+
+    telegram = _FakeTelegramClient(next_message_id=901)
+    worker = OutboxWorker(
+        repository=repository,
+        dispatcher=OutboxDispatcher(
+            repository=repository,
+            telegram_client=telegram,
+            calendar_client=_FakeCalendarClient(),
+        ),
+    )
+
+    first_tick = worker.run_once(now=now)
+    assert first_tick.processed is True
+    assert first_tick.status == OutboxStatus.DONE
+    assert len(telegram.edited) == 1
+    assert telegram.edited[0]["text"] == "pending progress"
+
+    confirmed = replace(
+        meeting,
+        state=MeetingState.CONFIRMED,
+    )
+    _ = repository.apply_execution(
+        before=meeting,
+        execution=CommandExecution(
+            result=CommandResult(Outcome.OK, ReasonCode.UPDATED),
+            meeting=confirmed,
+        ),
+        now=now,
+    )
+
+    _ = repository.enqueue_outbox(
+        effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
+        payload={
+            "telegram_user_id": meeting.chat_id,
+            "message_id": 777,
+            "text": "final status",
+            "_group_status_message": True,
+            "_meeting_id": meeting.meeting_id,
+            "_meeting_round": meeting.confirmation_round,
+            "_group_status_tag": "confirmed",
+        },
+        idempotency_key=(
+            f"cal_sync_final:{meeting.meeting_id}:r{meeting.confirmation_round}:confirmed:ok"
+        ),
+        now=now,
+    )
+
+    _ = repository.enqueue_outbox(
+        effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
+        payload={
+            "telegram_user_id": meeting.chat_id,
+            "text": "stale pending progress",
+            "_group_status_message": True,
+            "_meeting_id": meeting.meeting_id,
+            "_meeting_round": meeting.confirmation_round,
+            "_group_status_tag": "pending_progress",
+        },
+        idempotency_key=(
+            f"group_status:{meeting.meeting_id}:r{meeting.confirmation_round}:"
+            "pending_progress:edit:u300:confirm:2026-02-21T10:00:06.000000"
+        ),
+        now=now + timedelta(seconds=6),
+    )
+
+    second_tick = worker.run_once(now=now + timedelta(seconds=6))
+    assert second_tick.processed is True
+    assert second_tick.status == OutboxStatus.DONE
+
+    third_tick = worker.run_once(now=now + timedelta(seconds=6))
+    assert third_tick.processed is True
+    assert third_tick.status == OutboxStatus.DONE
+
+    assert len(telegram.edited) == 2
+    assert telegram.edited[1]["text"] == "final status"
     repository.close()

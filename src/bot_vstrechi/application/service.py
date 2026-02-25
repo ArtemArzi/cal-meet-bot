@@ -42,6 +42,10 @@ from bot_vstrechi.telegram.presentation import (
 
 logger = logging.getLogger(__name__)
 
+TERMINAL_SYNC_PENDING_TEXT = (
+    "⏳ Обновляем финальный статус в календаре. Скоро покажем итог."
+)
+
 
 @dataclass(frozen=True)
 class MeetDraftSession:
@@ -1051,6 +1055,44 @@ class MeetingWorkflowService:
             and execution.meeting.state == MeetingState.PENDING
             and (added_required_user_ids or removed_required_user_ids)
         ):
+            if removed_required_user_ids:
+                _ = self._repository.expire_callback_tokens_for_participants(
+                    meeting_id=execution.meeting.meeting_id,
+                    round=execution.meeting.confirmation_round,
+                    user_ids=removed_required_user_ids,
+                    now=now,
+                )
+                removed_pending_keys = tuple(
+                    (
+                        f"notify:{execution.meeting.meeting_id}:"
+                        f"r{execution.meeting.confirmation_round}:"
+                        f"pending:participant:{participant_user_id}"
+                    )
+                    for participant_user_id in removed_required_user_ids
+                )
+                _ = self._repository.suppress_pending_outbox_by_keys(
+                    keys=removed_pending_keys,
+                    reason=("suppressed: participant removed from required list"),
+                    now=now,
+                )
+                for participant_user_id in removed_required_user_ids:
+                    _ = self._repository.enqueue_outbox(
+                        effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+                        payload={
+                            "telegram_user_id": participant_user_id,
+                            "text": (
+                                "Вы больше не обязательный участник этой встречи.\n"
+                                "Предыдущие кнопки подтверждения больше не действуют."
+                            ),
+                        },
+                        idempotency_key=(
+                            f"notify:{execution.meeting.meeting_id}:"
+                            f"r{execution.meeting.confirmation_round}:"
+                            f"removed_participant:{participant_user_id}"
+                        ),
+                        now=now,
+                    )
+
             for participant_user_id in added_required_user_ids:
                 self._enqueue_pending_participant_decision_request(
                     meeting=execution.meeting,
@@ -1126,6 +1168,7 @@ class MeetingWorkflowService:
         meeting_id: str,
         actor_user_id: int,
         reason: str,
+        requested_by_user_id: int | None = None,
         now: datetime,
     ) -> CommandExecution:
         meeting = self._require_meeting(meeting_id)
@@ -1135,6 +1178,7 @@ class MeetingWorkflowService:
             execution=execution,
             action="cancel_meeting",
             actor_user_id=actor_user_id,
+            requested_by_user_id=requested_by_user_id,
             now=now,
         )
 
@@ -1143,6 +1187,7 @@ class MeetingWorkflowService:
         *,
         meeting_id: str,
         actor_user_id: int,
+        requested_by_user_id: int | None = None,
         now: datetime,
     ) -> CommandExecution:
         meeting = self._require_meeting(meeting_id)
@@ -1152,6 +1197,7 @@ class MeetingWorkflowService:
             execution=execution,
             action="proceed_without_subset",
             actor_user_id=actor_user_id,
+            requested_by_user_id=requested_by_user_id,
             now=now,
         )
 
@@ -1162,6 +1208,7 @@ class MeetingWorkflowService:
         execution: CommandExecution,
         action: str,
         actor_user_id: int | None = None,
+        requested_by_user_id: int | None = None,
         now: datetime,
     ) -> CommandExecution:
         if execution.result.outcome != Outcome.OK:
@@ -1170,6 +1217,7 @@ class MeetingWorkflowService:
                 execution=execution,
                 action=action,
                 actor_user_id=actor_user_id,
+                requested_by_user_id=requested_by_user_id,
                 now=now,
             )
             logger.info(
@@ -1192,6 +1240,12 @@ class MeetingWorkflowService:
                 self._enqueue_transition_notifications(
                     before=before,
                     after=execution.meeting,
+                    defer_terminal_status=(
+                        not action.startswith("calendar_ingest_")
+                        and execution.meeting.created_by_bot
+                        and isinstance(execution.meeting.google_event_id, str)
+                        and bool(execution.meeting.google_event_id)
+                    ),
                     now=now,
                 )
                 if (
@@ -1216,6 +1270,7 @@ class MeetingWorkflowService:
                     execution=execution,
                     action=action,
                     actor_user_id=actor_user_id,
+                    requested_by_user_id=requested_by_user_id,
                     now=now,
                 )
                 logger.info(
@@ -1240,6 +1295,7 @@ class MeetingWorkflowService:
             execution=conflict_execution,
             action=action,
             actor_user_id=actor_user_id,
+            requested_by_user_id=requested_by_user_id,
             now=now,
         )
         logger.info(
@@ -1259,6 +1315,7 @@ class MeetingWorkflowService:
         *,
         before: Meeting,
         after: Meeting,
+        defer_terminal_status: bool,
         now: datetime,
     ) -> None:
         if before.state == after.state:
@@ -1271,6 +1328,21 @@ class MeetingWorkflowService:
             return
 
         if after.state == MeetingState.CONFIRMED:
+            if before.state == MeetingState.PENDING:
+                self._repository.suppress_pending_group_progress_outbox(
+                    meeting_id=after.meeting_id,
+                    round=after.confirmation_round,
+                    now=now,
+                )
+            if defer_terminal_status:
+                self._enqueue_group_status_update(
+                    meeting=after,
+                    text=TERMINAL_SYNC_PENDING_TEXT,
+                    status_tag="terminal_sync_pending",
+                    status_revision=after.state,
+                    now=now,
+                )
+                return
             self._enqueue_group_status_update(
                 meeting=after,
                 text=f"✅ Встреча подтверждена.\n{meeting_context}",
@@ -1284,6 +1356,21 @@ class MeetingWorkflowService:
             return
 
         if after.state == MeetingState.CANCELLED:
+            if before.state == MeetingState.PENDING:
+                self._repository.suppress_pending_group_progress_outbox(
+                    meeting_id=after.meeting_id,
+                    round=after.confirmation_round,
+                    now=now,
+                )
+            if defer_terminal_status:
+                self._enqueue_group_status_update(
+                    meeting=after,
+                    text=TERMINAL_SYNC_PENDING_TEXT,
+                    status_tag="terminal_sync_pending",
+                    status_revision=after.state,
+                    now=now,
+                )
+                return
             self._enqueue_group_status_update(
                 meeting=after,
                 text=f"❌ Встреча отменена.\n{meeting_context}",
@@ -1293,6 +1380,21 @@ class MeetingWorkflowService:
             return
 
         if after.state == MeetingState.EXPIRED:
+            if before.state == MeetingState.PENDING:
+                self._repository.suppress_pending_group_progress_outbox(
+                    meeting_id=after.meeting_id,
+                    round=after.confirmation_round,
+                    now=now,
+                )
+            if defer_terminal_status:
+                self._enqueue_group_status_update(
+                    meeting=after,
+                    text=TERMINAL_SYNC_PENDING_TEXT,
+                    status_tag="terminal_sync_pending",
+                    status_revision=after.state,
+                    now=now,
+                )
+                return
             self._enqueue_group_status_update(
                 meeting=after,
                 text=f"⌛ Встреча просрочена.\n{meeting_context}",
@@ -1314,14 +1416,16 @@ class MeetingWorkflowService:
             "text": text,
             "_group_status_message": True,
             "_meeting_id": meeting.meeting_id,
+            "_meeting_round": meeting.confirmation_round,
+            "_group_status_tag": status_tag,
         }
+        revision_suffix = (
+            f":{status_revision}"
+            if isinstance(status_revision, str) and status_revision
+            else ""
+        )
 
         if meeting.group_status_message_id is not None:
-            revision_suffix = (
-                f":{status_revision}"
-                if isinstance(status_revision, str) and status_revision
-                else ""
-            )
             payload["message_id"] = meeting.group_status_message_id
             _ = self._repository.enqueue_outbox(
                 effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
@@ -1334,11 +1438,17 @@ class MeetingWorkflowService:
             )
             return
 
-        revision_suffix = (
-            f":{status_revision}"
-            if isinstance(status_revision, str) and status_revision
-            else ""
-        )
+        if status_tag == "pending_progress":
+            _ = self._repository.enqueue_outbox(
+                effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
+                payload=payload,
+                idempotency_key=(
+                    f"group_status:{meeting.meeting_id}:r{meeting.confirmation_round}:"
+                    f"{status_tag}:edit{revision_suffix}"
+                ),
+                now=now,
+            )
+            return
         _ = self._repository.enqueue_outbox(
             effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
             payload=payload,
@@ -1428,6 +1538,10 @@ class MeetingWorkflowService:
                         "callback_data": cancel_button.callback_data,
                     },
                 ],
+                "_meeting_id": meeting.meeting_id,
+                "_meeting_round": meeting.confirmation_round,
+                "_participant_user_id": participant_user_id,
+                "_pending_participant_request": True,
             },
             idempotency_key=(
                 f"notify:{meeting.meeting_id}:r{meeting.confirmation_round}:"
@@ -1448,7 +1562,6 @@ class MeetingWorkflowService:
             before.state != MeetingState.PENDING
             or after.state != MeetingState.PENDING
             or before.confirmation_round != after.confirmation_round
-            or after.group_status_message_id is None
         ):
             return
 
@@ -1797,6 +1910,7 @@ class MeetingWorkflowService:
                 return
 
             patch_payload: dict[str, object] = {}
+            final_group_status_text: str | None = None
             if after.state == MeetingState.CONFIRMED:
                 patch_payload["summary"] = f"✅ {after.title or 'Встреча'}"
                 patch_payload["description"] = (
@@ -1804,6 +1918,9 @@ class MeetingWorkflowService:
                 )
                 patch_payload["status"] = "confirmed"
                 patch_payload["transparency"] = "opaque"
+                final_group_status_text = (
+                    f"✅ Встреча подтверждена.\n{self._meeting_context_text(after)}"
+                )
             elif after.state == MeetingState.CANCELLED:
                 patch_payload["summary"] = f"❌ [ОТМЕНЕНА] {after.title or 'Встреча'}"
                 patch_payload["description"] = (
@@ -1811,12 +1928,18 @@ class MeetingWorkflowService:
                 )
                 patch_payload["status"] = "cancelled"
                 patch_payload["transparency"] = "transparent"
+                final_group_status_text = (
+                    f"❌ Встреча отменена.\n{self._meeting_context_text(after)}"
+                )
             elif after.state == MeetingState.EXPIRED:
                 patch_payload["summary"] = f"⌛ [ПРОСРОЧЕНА] {after.title or 'Встреча'}"
                 patch_payload["description"] = (
                     f"Срок подтверждения в Telegram истек.\nID: {after.meeting_id}"
                 )
                 patch_payload["transparency"] = "transparent"
+                final_group_status_text = (
+                    f"⌛ Встреча просрочена.\n{self._meeting_context_text(after)}"
+                )
 
             if patch_payload:
                 patch_outbox_payload: dict[str, object] = {
@@ -1824,6 +1947,15 @@ class MeetingWorkflowService:
                     "initiator_google_email": initiator_email,
                     "payload": patch_payload,
                 }
+                if isinstance(final_group_status_text, str):
+                    patch_outbox_payload["_post_patch_group_status"] = {
+                        "meeting_id": after.meeting_id,
+                        "round": after.confirmation_round,
+                        "target_state": after.state,
+                        "chat_id": after.chat_id,
+                        "initiator_user_id": after.initiator_telegram_user_id,
+                        "text": final_group_status_text,
+                    }
                 _ = self._repository.enqueue_outbox(
                     effect_type=OutboxEffectType.CALENDAR_PATCH_EVENT,
                     payload=patch_outbox_payload,
@@ -1923,20 +2055,27 @@ class MeetingWorkflowService:
         execution: CommandExecution,
         action: str,
         actor_user_id: int | None,
+        requested_by_user_id: int | None,
         now: datetime,
     ) -> None:
+        actor_for_audit = requested_by_user_id or actor_user_id
+        details: dict[str, object] = {
+            "outcome": execution.result.outcome,
+            "reason_code": execution.result.reason_code,
+            "state_before": before.state,
+            "state_after": execution.meeting.state,
+        }
+        if requested_by_user_id is not None:
+            details["effective_actor_user_id"] = actor_user_id
+            details["requested_by_user_id"] = requested_by_user_id
+            details["delegated"] = requested_by_user_id != actor_user_id
         self._repository.insert_audit_log(
             meeting_id=execution.meeting.meeting_id,
             round=execution.meeting.confirmation_round,
-            actor_telegram_user_id=actor_user_id,
-            actor_type="user" if actor_user_id is not None else "system",
+            actor_telegram_user_id=actor_for_audit,
+            actor_type="user" if actor_for_audit is not None else "system",
             action=action,
-            details={
-                "outcome": execution.result.outcome,
-                "reason_code": execution.result.reason_code,
-                "state_before": before.state,
-                "state_after": execution.meeting.state,
-            },
+            details=details,
             now=now,
         )
 

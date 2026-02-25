@@ -1137,6 +1137,62 @@ class SQLiteRepository:
         )
         self._commit()
 
+    def suppress_pending_outbox_by_keys(
+        self,
+        *,
+        keys: tuple[str, ...],
+        reason: str,
+        now: datetime,
+    ) -> int:
+        if not keys:
+            return 0
+        placeholders = ", ".join(["?"] * len(keys))
+        query = (
+            "UPDATE outbox "
+            + "SET status = ?, locked_at = NULL, last_error = ?, updated_at = ? "
+            + "WHERE status = ? AND idempotency_key IN ("
+            + placeholders
+            + ")"
+        )
+        result = self._conn.execute(
+            query,
+            (
+                OutboxStatus.FAILED,
+                reason,
+                _serialize_datetime(now),
+                OutboxStatus.PENDING,
+                *keys,
+            ),
+        )
+        self._commit()
+        return result.rowcount
+
+    def suppress_pending_group_progress_outbox(
+        self,
+        *,
+        meeting_id: str,
+        round: int,
+        now: datetime,
+    ) -> int:
+        key_prefix = f"group_status:{meeting_id}:r{round}:pending_progress:"
+        query = (
+            "UPDATE outbox "
+            + "SET status = ?, locked_at = NULL, last_error = ?, updated_at = ? "
+            + "WHERE status = ? AND idempotency_key LIKE ?"
+        )
+        result = self._conn.execute(
+            query,
+            (
+                OutboxStatus.FAILED,
+                "suppressed: meeting is no longer pending for this round",
+                _serialize_datetime(now),
+                OutboxStatus.PENDING,
+                f"{key_prefix}%",
+            ),
+        )
+        self._commit()
+        return result.rowcount
+
     def reconcile_stale_running_outbox(
         self, *, stale_before: datetime, now: datetime
     ) -> int:
@@ -2279,6 +2335,36 @@ class SQLiteRepository:
                 field="callback_action_token.expires_at",
             ),
         )
+
+    def expire_callback_tokens_for_participants(
+        self,
+        *,
+        meeting_id: str,
+        round: int,
+        user_ids: tuple[int, ...],
+        now: datetime,
+    ) -> int:
+        if not user_ids:
+            return 0
+        placeholders = ", ".join(["?"] * len(user_ids))
+        query = (
+            "UPDATE callback_action_token "
+            + "SET expires_at = ? "
+            + "WHERE meeting_id = ? AND round = ? AND allowed_user_id IN ("
+            + placeholders
+            + ")"
+        )
+        result = self._conn.execute(
+            query,
+            (
+                _serialize_datetime(now),
+                meeting_id,
+                round,
+                *user_ids,
+            ),
+        )
+        self._commit()
+        return result.rowcount
 
     def count_jobs(
         self,

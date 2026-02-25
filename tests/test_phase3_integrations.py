@@ -143,6 +143,43 @@ def test_webhook_stale_callback_round_mismatch(tmp_path: Path) -> None:
     repository.close()
 
 
+def test_removed_participant_pending_callback_is_rejected(tmp_path: Path) -> None:
+    now = datetime(2026, 2, 11, 16, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = _pending_meeting(now)
+    repository.insert_meeting(meeting, now=now)
+
+    stale_token = CallbackActionToken(
+        token="tok-removed-user",
+        meeting_id=meeting.meeting_id,
+        round=meeting.confirmation_round,
+        action_type=CallbackActionType.PARTICIPANT_CONFIRM,
+        allowed_user_id=300,
+        expires_at=now + timedelta(minutes=5),
+    )
+    repository.upsert_callback_action_token(callback_token=stale_token, now=now)
+
+    service = MeetingWorkflowService(repository, calendar_gateway=MagicMock())
+    adapter = TelegramWebhookAdapter(repository=repository, workflow_service=service)
+
+    result = adapter.handle_update(
+        update={
+            "update_id": 20_001,
+            "callback_query": {
+                "id": "cb-removed-user",
+                "from": {"id": 300},
+                "data": "act:tok-removed-user",
+            },
+        },
+        now=now,
+    )
+
+    assert result.outcome == Outcome.NOOP
+    assert result.reason_code == ReasonCode.STALE_ACTION
+    assert result.message == STALE_ACTION_MESSAGE
+    repository.close()
+
+
 def test_duplicate_callback_still_enqueues_callback_answer(tmp_path: Path) -> None:
     now = datetime(2026, 2, 11, 16, 0, 0)
     repository = _repo(tmp_path)

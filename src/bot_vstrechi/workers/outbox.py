@@ -10,6 +10,8 @@ from bot_vstrechi.domain.commands import CommandExecution
 from bot_vstrechi.db.repository import ClaimedOutbox, SQLiteRepository
 from bot_vstrechi.domain.models import (
     CommandResult,
+    Decision,
+    MeetingState,
     OutboxEffectType,
     OutboxStatus,
     Outcome,
@@ -107,9 +109,44 @@ class OutboxDispatcher:
         keyboard_obj = message.payload.get("keyboard")
         is_group_status_obj = message.payload.get("_group_status_message")
         meeting_id_obj = message.payload.get("_meeting_id")
+        pending_participant_request_obj = message.payload.get(
+            "_pending_participant_request"
+        )
+        meeting_round_obj = message.payload.get("_meeting_round")
+        participant_user_id_obj = message.payload.get("_participant_user_id")
         is_group_status = isinstance(is_group_status_obj, bool) and is_group_status_obj
         if not isinstance(user_id_obj, int) or not isinstance(text_obj, str):
             raise ValueError("Invalid telegram outbox payload")
+
+        if (
+            isinstance(pending_participant_request_obj, bool)
+            and pending_participant_request_obj
+            and isinstance(meeting_id_obj, str)
+            and isinstance(meeting_round_obj, int)
+            and isinstance(participant_user_id_obj, int)
+        ):
+            meeting = self._repository.get_meeting(meeting_id_obj)
+            if meeting is None:
+                return
+            if (
+                meeting.state != MeetingState.PENDING
+                or meeting.confirmation_round != meeting_round_obj
+            ):
+                return
+            participant = next(
+                (
+                    item
+                    for item in meeting.participants
+                    if item.telegram_user_id == participant_user_id_obj
+                ),
+                None,
+            )
+            if (
+                participant is None
+                or not participant.is_required
+                or participant.decision != Decision.NONE
+            ):
+                return
 
         buttons: list[dict[str, str] | list[dict[str, str]]] | None = None
         if isinstance(buttons_obj, list):
@@ -187,12 +224,42 @@ class OutboxDispatcher:
         buttons_obj = message.payload.get("buttons")
         is_group_status_obj = message.payload.get("_group_status_message")
         meeting_id_obj = message.payload.get("_meeting_id")
-        if (
-            not isinstance(user_id_obj, int)
-            or not isinstance(message_id_obj, int)
-            or not isinstance(text_obj, str)
-        ):
+        group_status_tag_obj = message.payload.get("_group_status_tag")
+        meeting_round_obj = message.payload.get("_meeting_round")
+        if not isinstance(user_id_obj, int) or not isinstance(text_obj, str):
             raise ValueError("Invalid telegram edit payload")
+
+        is_group_status = isinstance(is_group_status_obj, bool) and is_group_status_obj
+        resolved_message_id: int | None = None
+        if isinstance(message_id_obj, int):
+            resolved_message_id = message_id_obj
+        elif is_group_status and isinstance(meeting_id_obj, str):
+            meeting = self._repository.get_meeting(meeting_id_obj)
+            pointer = None if meeting is None else meeting.group_status_message_id
+            if not isinstance(pointer, int):
+                raise RetryableOutboxError(
+                    "Group status message pointer is not set yet"
+                )
+            resolved_message_id = pointer
+
+        if not isinstance(resolved_message_id, int):
+            raise ValueError("Invalid telegram edit payload")
+
+        if (
+            isinstance(is_group_status_obj, bool)
+            and is_group_status_obj
+            and group_status_tag_obj == "pending_progress"
+            and isinstance(meeting_id_obj, str)
+            and isinstance(meeting_round_obj, int)
+        ):
+            meeting = self._repository.get_meeting(meeting_id_obj)
+            if meeting is None:
+                return
+            if (
+                meeting.state != MeetingState.PENDING
+                or meeting.confirmation_round != meeting_round_obj
+            ):
+                return
 
         buttons: list[dict[str, str] | list[dict[str, str]]] | None = None
         if isinstance(buttons_obj, list):
@@ -224,7 +291,7 @@ class OutboxDispatcher:
         try:
             self._telegram_client.edit_message(
                 telegram_user_id=user_id_obj,
-                message_id=message_id_obj,
+                message_id=resolved_message_id,
                 text=text_obj,
                 buttons=buttons,
                 idempotency_key=message.idempotency_key,
@@ -233,9 +300,6 @@ class OutboxDispatcher:
             if self._is_edit_already_applied(error):
                 return
 
-            is_group_status = (
-                isinstance(is_group_status_obj, bool) and is_group_status_obj
-            )
             if (
                 is_group_status
                 and isinstance(meeting_id_obj, str)
@@ -329,6 +393,55 @@ class OutboxDispatcher:
             initiator_google_email=email_obj,
             payload=payload,
             idempotency_key=message.idempotency_key,
+        )
+
+        post_patch_obj = message.payload.get("_post_patch_group_status")
+        if not isinstance(post_patch_obj, dict):
+            return
+
+        post_patch = cast(dict[str, object], post_patch_obj)
+        meeting_id_obj = post_patch.get("meeting_id")
+        round_obj = post_patch.get("round")
+        target_state_obj = post_patch.get("target_state")
+        chat_id_obj = post_patch.get("chat_id")
+        text_obj = post_patch.get("text")
+        if (
+            not isinstance(meeting_id_obj, str)
+            or not isinstance(round_obj, int)
+            or not isinstance(target_state_obj, str)
+            or not isinstance(chat_id_obj, int)
+            or not isinstance(text_obj, str)
+        ):
+            return
+
+        meeting = self._repository.get_meeting(meeting_id_obj)
+        status_tag = target_state_obj.lower()
+        final_key = f"cal_sync_final:{meeting_id_obj}:r{round_obj}:{status_tag}:ok"
+        if meeting is not None and isinstance(meeting.group_status_message_id, int):
+            _ = self._repository.enqueue_outbox(
+                effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
+                payload={
+                    "telegram_user_id": chat_id_obj,
+                    "message_id": meeting.group_status_message_id,
+                    "text": text_obj,
+                    "_group_status_message": True,
+                    "_meeting_id": meeting_id_obj,
+                },
+                idempotency_key=final_key,
+                now=message.run_after,
+            )
+            return
+
+        _ = self._repository.enqueue_outbox(
+            effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+            payload={
+                "telegram_user_id": chat_id_obj,
+                "text": text_obj,
+                "_group_status_message": True,
+                "_meeting_id": meeting_id_obj,
+            },
+            idempotency_key=final_key,
+            now=message.run_after,
         )
 
     def _dispatch_calendar_insert(self, *, message: ClaimedOutbox) -> None:
@@ -447,6 +560,11 @@ class OutboxWorker:
                 error=error,
                 now=now,
             )
+            self._notify_calendar_patch_failure(
+                message=message,
+                error=error,
+                now=now,
+            )
 
             self._repository.mark_outbox_failed(
                 outbox_id=message.outbox_id,
@@ -512,6 +630,74 @@ class OutboxWorker:
                 idempotency_key=(
                     f"manager_undeliverable:{message.outbox_id}:"
                     f"{manager_id}:{now.isoformat(timespec='seconds')}"
+                ),
+                now=now,
+            )
+
+    def _notify_calendar_patch_failure(
+        self,
+        *,
+        message: ClaimedOutbox,
+        error: Exception,
+        now: datetime,
+    ) -> None:
+        if message.effect_type != OutboxEffectType.CALENDAR_PATCH_EVENT:
+            return
+
+        post_patch_obj = message.payload.get("_post_patch_group_status")
+        if not isinstance(post_patch_obj, dict):
+            return
+        post_patch = cast(dict[str, object], post_patch_obj)
+        meeting_id_obj = post_patch.get("meeting_id")
+        round_obj = post_patch.get("round")
+        target_state_obj = post_patch.get("target_state")
+        chat_id_obj = post_patch.get("chat_id")
+        initiator_user_id_obj = post_patch.get("initiator_user_id")
+        if (
+            not isinstance(meeting_id_obj, str)
+            or not isinstance(round_obj, int)
+            or not isinstance(target_state_obj, str)
+        ):
+            return
+
+        warning_text = (
+            "⚠️ Не удалось синхронизировать финальный статус встречи с Google Calendar.\n"
+            f"ID: {meeting_id_obj}\n"
+            f"Раунд: {round_obj}\n"
+            f"Целевой статус: {target_state_obj}\n"
+            f"Ошибка: {error}"
+        )
+
+        recipients: set[int] = set(self._repository.list_active_manager_ids())
+        if isinstance(initiator_user_id_obj, int):
+            recipients.add(initiator_user_id_obj)
+        for user_id in recipients:
+            _ = self._repository.enqueue_outbox(
+                effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+                payload={
+                    "telegram_user_id": user_id,
+                    "text": warning_text,
+                    "_manager_alert": True,
+                },
+                idempotency_key=(
+                    f"cal_sync_final:{meeting_id_obj}:r{round_obj}:"
+                    f"{target_state_obj}:fail:user:{user_id}"
+                ),
+                now=now,
+            )
+
+        if isinstance(chat_id_obj, int):
+            _ = self._repository.enqueue_outbox(
+                effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+                payload={
+                    "telegram_user_id": chat_id_obj,
+                    "text": warning_text,
+                    "_group_status_message": True,
+                    "_meeting_id": meeting_id_obj,
+                },
+                idempotency_key=(
+                    f"cal_sync_final:{meeting_id_obj}:r{round_obj}:"
+                    f"{target_state_obj}:fail:chat"
                 ),
                 now=now,
             )

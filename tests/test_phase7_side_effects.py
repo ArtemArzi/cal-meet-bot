@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from bot_vstrechi.domain import (
+    CallbackActionType,
     Decision,
     JobStatus,
     JobType,
@@ -204,9 +205,17 @@ def test_pending_decision_enqueues_immediate_calendar_attendee_patch(
         == 1
     )
 
-    patch_message = repository.claim_due_outbox(now=now)
+    patch_message = None
+    while True:
+        outbox = repository.claim_due_outbox(now=now)
+        if outbox is None:
+            break
+        if outbox.effect_type != OutboxEffectType.CALENDAR_PATCH_EVENT:
+            continue
+        patch_message = outbox
+        break
+
     assert patch_message is not None
-    assert patch_message.effect_type == OutboxEffectType.CALENDAR_PATCH_EVENT
     assert patch_message.payload.get("google_event_id") == "evt-7-attendee-sync"
     assert patch_message.payload.get("initiator_google_email") == "initiator@4sell.ai"
 
@@ -422,7 +431,7 @@ def test_pending_progress_edits_have_distinct_keys_same_timestamp(
     repository.close()
 
 
-def test_pending_progress_update_skipped_without_group_pointer(tmp_path: Path) -> None:
+def test_pending_progress_update_enqueued_without_group_pointer(tmp_path: Path) -> None:
     now = datetime(2026, 2, 13, 10, 0, 0)
     repository = _repo(tmp_path)
     meeting = _meeting(now, meeting_id="m-7-pending-progress-no-pointer")
@@ -445,8 +454,72 @@ def test_pending_progress_update_skipped_without_group_pointer(tmp_path: Path) -
             status=OutboxStatus.PENDING,
             effect_type=OutboxEffectType.TELEGRAM_EDIT_MESSAGE,
         )
-        == 0
+        == 1
     )
+    pending_edit = repository.claim_due_outbox(now=now)
+    assert pending_edit is not None
+    assert pending_edit.effect_type == OutboxEffectType.TELEGRAM_EDIT_MESSAGE
+    assert pending_edit.payload.get("telegram_user_id") == meeting.chat_id
+    assert pending_edit.payload.get("_group_status_message") is True
+    assert pending_edit.payload.get("_meeting_id") == meeting.meeting_id
+    assert "message_id" not in pending_edit.payload
+    repository.close()
+
+
+def test_removed_participant_tokens_expired_and_pending_dm_suppressed(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 2, 13, 10, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = _meeting(now, meeting_id="m-7-remove-participant")
+    repository.insert_meeting(meeting, now=now)
+    service = MeetingWorkflowService(repository, calendar_gateway=MagicMock())
+
+    token = service._callback_tokens._issue_token(  # noqa: SLF001 - test-only setup
+        meeting=meeting,
+        action_type=CallbackActionType.PARTICIPANT_CONFIRM,
+        allowed_user_id=300,
+        now=now,
+    )
+    pending_key = (
+        f"notify:{meeting.meeting_id}:r{meeting.confirmation_round}:"
+        "pending:participant:300"
+    )
+    _ = repository.enqueue_outbox(
+        effect_type=OutboxEffectType.TELEGRAM_SEND_MESSAGE,
+        payload={"telegram_user_id": 300, "text": "stale request"},
+        idempotency_key=pending_key,
+        now=now,
+    )
+
+    execution = service.sync_participants_from_calendar(
+        meeting_id=meeting.meeting_id,
+        actor_user_id=meeting.initiator_telegram_user_id,
+        required_participant_user_ids=(200,),
+        now=now,
+    )
+
+    assert execution.result.outcome == Outcome.OK
+    refreshed_token = repository.get_callback_action_token(token.token)
+    assert refreshed_token is not None
+    assert refreshed_token.expires_at <= now
+
+    outbox_row = repository._conn.execute(  # noqa: SLF001 - test assertion
+        "SELECT status, last_error FROM outbox WHERE idempotency_key = ?",
+        (pending_key,),
+    ).fetchone()
+    assert outbox_row is not None
+    assert outbox_row["status"] == OutboxStatus.FAILED
+    assert isinstance(outbox_row["last_error"], str)
+    assert "participant removed" in outbox_row["last_error"]
+
+    removed_notice = repository._conn.execute(  # noqa: SLF001 - test assertion
+        "SELECT payload_json FROM outbox WHERE idempotency_key = ?",
+        (
+            f"notify:{meeting.meeting_id}:r{meeting.confirmation_round}:removed_participant:300",
+        ),
+    ).fetchone()
+    assert removed_notice is not None
     repository.close()
 
 

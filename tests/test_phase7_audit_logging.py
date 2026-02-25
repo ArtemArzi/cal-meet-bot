@@ -109,6 +109,66 @@ def test_audit_log_written_on_cancel(tmp_path: Path) -> None:
     repository.close()
 
 
+def test_manager_action_audit_contains_requested_by(tmp_path: Path) -> None:
+    now = datetime(2026, 2, 13, 11, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = replace(
+        _meeting(now, meeting_id="m-7-audit-manager-requested-by"),
+        state=MeetingState.NEEDS_INITIATOR_DECISION,
+    )
+    repository.insert_meeting(meeting, now=now)
+    service = MeetingWorkflowService(repository, calendar_gateway=MagicMock())
+
+    _ = service.cancel_meeting(
+        meeting_id=meeting.meeting_id,
+        actor_user_id=meeting.initiator_telegram_user_id,
+        requested_by_user_id=300,
+        reason="initiator_callback",
+        now=now,
+    )
+
+    logs = repository.get_audit_logs(meeting.meeting_id)
+    assert len(logs) == 1
+    assert logs[0]["actor_telegram_user_id"] == 300
+    details_json = logs[0]["details_json"]
+    assert isinstance(details_json, str)
+    details = cast(dict[str, object], json.loads(details_json))
+    assert details.get("effective_actor_user_id") == 100
+    assert details.get("requested_by_user_id") == 300
+    assert details.get("delegated") is True
+    repository.close()
+
+
+def test_manager_proceed_audit_contains_requested_by(tmp_path: Path) -> None:
+    now = datetime(2026, 2, 13, 11, 0, 0)
+    repository = _repo(tmp_path)
+    meeting = replace(
+        _meeting(now, meeting_id="m-7-audit-manager-proceed-requested-by"),
+        state=MeetingState.NEEDS_INITIATOR_DECISION,
+    )
+    repository.insert_meeting(meeting, now=now)
+    service = MeetingWorkflowService(repository, calendar_gateway=MagicMock())
+
+    _ = service.proceed_without_subset(
+        meeting_id=meeting.meeting_id,
+        actor_user_id=meeting.initiator_telegram_user_id,
+        requested_by_user_id=300,
+        now=now,
+    )
+
+    logs = repository.get_audit_logs(meeting.meeting_id)
+    assert len(logs) == 1
+    assert logs[0]["actor_telegram_user_id"] == 300
+    assert logs[0]["action"] == "proceed_without_subset"
+    details_json = logs[0]["details_json"]
+    assert isinstance(details_json, str)
+    details = cast(dict[str, object], json.loads(details_json))
+    assert details.get("effective_actor_user_id") == 100
+    assert details.get("requested_by_user_id") == 300
+    assert details.get("delegated") is True
+    repository.close()
+
+
 def test_audit_log_contains_state_transition_details(tmp_path: Path) -> None:
     now = datetime(2026, 2, 13, 11, 0, 0)
     repository = _repo(tmp_path)
